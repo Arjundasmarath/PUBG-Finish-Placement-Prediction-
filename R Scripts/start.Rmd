@@ -172,24 +172,98 @@ corrplot(cor(train.cor),method = "circle")
 ```
 
 ```{r}
-df <- rsample::attrition %>% 
-  dplyr::mutate_if(is.ordered, factor, ordered = FALSE) %>%
-  dplyr::mutate(Attrition = factor(Attrition, levels = c("Yes", "No")))
+train$cheaters <- 0
+train$cheaters[train$kmperhour > 20] <- 1
 
-index <- 1:5
-train_obs <- df[-index, ]
-local_obs <- df[index, ]
+test$cheaters <- 0
+test$cheaters[test$kmperhour > 20] <- 1
+
+#table( train$kills > 40 )
+train$killer_flag <- 0
+train$killer_flag[train$kills > 40] <- 1
+
+test$killer_flag <- 0
+test$killer_flag[test$kills > 40] <- 1
+
+train$headshot_rate <- 0
+test$headshot_rate <- 0
+train$headshot_rate <- train$headshotKills / train$kills
+test$headshot_rate <- test$headshotKills / test$kills
+table(train$headshot_rate)
+
+```
+##Zombies
+
+```{r}
+
+zombies <- train %>%filter(walkDistance == 0 , weaponsAcquired==0)
+totalMatches<-length(unique(train$matchId))
+zombies<-summarise(group_by(zombies,matchId),ZombieCount=n()
+                                            ,meanWinPlacePerc=mean(winPlacePerc,na.rm=T)
+                                            ,IsSolo=max(ifelse(grepl("solo", matchType, fixed=TRUE)==T,1,0))
+                                            ,IsDuo=max(ifelse(grepl("duo", matchType, fixed=TRUE)==T,1,0))
+                                            ,IsSquad=max(ifelse(grepl("squad", matchType, fixed=TRUE)==T,1,0)))%>%mutate(row=row_number())
+
+head(zombies)
 ```
 
 ```{r}
-DF <- data.frame(x=letters[1:5], y=1:5, stringsAsFactors=FALSE)
+#For training we will remove any matches were numGroups ==1 as we know these will always be 0
+train<-train%>%filter(numGroups>1)
 
-str(DF)
+# <- match_types(train)
+train <- combat_scores(train)
+
 ```
 
 ```{r}
-DF <- as.data.frame(unclass(DF))
-str(DF)
+cat("splitting data")
+train.rows <- createDataPartition(train$winPlacePerc,p=0.8, list = FALSE)
+train1 <- train[train.rows,]
+test1 <- train[-train.rows,]
+str(train)
 
 ```
 
+## H2O - The library
+
+```{r}
+localH2O <- h2o.init(nthreads = -1)
+h2o.init()
+```
+
+```{r}
+train1.h2o <- as.h2o(train1)
+test1.h2o <- as.h2o(test1)
+test.h2o <- as.h2o(test)
+
+```
+
+```{r}
+y.dep <- 29
+x.indep <- c(4:28,30:31)
+
+cat("Running DL")
+dlearning.model <- h2o.deeplearning(y = y.dep,
+             x = x.indep,
+             training_frame = train1.h2o,
+             epoch = 60,
+             hidden = c(100,100),
+             activation = "Rectifier",
+             seed = 1122
+             )
+             
+```
+
+```{r}
+result <-as.data.frame(h2o.predict(dlearning.model,test1.h2o))
+head(result)
+MAE(result$predict,test1$winPlacePerc)
+
+result_dl <- as.data.frame(h2o.predict(dlearning.model,test.h2o))
+
+cat("Writing results")
+submission <- fread("../input/sample_submission_V2.csv")%>% mutate(winPlacePerc = result_dl$predict)
+write_csv(submission,"submission_dl.csv",append = FALSE)
+head(submission)
+```
